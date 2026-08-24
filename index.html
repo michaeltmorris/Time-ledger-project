@@ -118,10 +118,17 @@ function initMsal(){
 
 async function signIn(){
   if(!state.config.clientId){ alert("Enter your Client ID in Settings first."); return; }
-  const app = state.msal || initMsal();
-  localStorage.setItem("ptl_return_tab", "import");
-  await app.loginRedirect({ scopes:["Calendars.Read","User.Read"], loginHint: REQUIRED_ACCOUNT, prompt:"select_account" });
-  // page navigates away here; execution resumes in completeRedirect() on reload
+  try{
+    const app = state.msal || initMsal();
+    localStorage.setItem("ptl_return_tab", "import");
+    await app.loginRedirect({ scopes:["Calendars.Read","User.Read"], loginHint: REQUIRED_ACCOUNT, prompt:"select_account" });
+    // page navigates away here on success; execution resumes in completeRedirect() on reload
+  }catch(e){
+    console.error("Sign-in failed:", e);
+    state.outlookStatus = "error";
+    state.outlookError = (e.errorMessage || e.message || String(e));
+    render();
+  }
 }
 
 async function signOut(){
