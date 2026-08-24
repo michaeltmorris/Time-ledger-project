@@ -221,12 +221,14 @@ async function fetchOutlookEvents(){
       const accountMeta = ALLOWED_ACCOUNTS.find(a => a.email.toLowerCase() === (account.username||"").toLowerCase());
       const token = await getTokenFor(account);
       if(!token) continue; // redirected away for interactive auth
-      const url = `https://graph.microsoft.com/v1.0/me/calendarview?startDateTime=${encodeURIComponent(start)}&endDateTime=${encodeURIComponent(end)}&$orderby=start/dateTime&$top=100&$select=id,subject,start,end`;
+      const url = `https://graph.microsoft.com/v1.0/me/calendarview?startDateTime=${encodeURIComponent(start)}&endDateTime=${encodeURIComponent(end)}&$orderby=start/dateTime&$top=100&$select=id,subject,start,end,responseStatus,isCancelled`;
       const resp = await fetch(url, { headers: { Authorization: `Bearer ${token}`, Prefer: 'outlook.timezone="UTC"' } });
       if(!resp.ok) throw new Error(`Graph API error ${resp.status} for ${account.username}`);
       const data = await resp.json();
 
-      const mapped = (data.value || []).map(ev => {
+      const mapped = (data.value || [])
+        .filter(ev => !ev.isCancelled)
+        .map(ev => {
         const startMs = new Date(ev.start.dateTime + "Z").getTime();
         const endMs = new Date(ev.end.dateTime + "Z").getTime();
         const hours = Math.max(0, (endMs - startMs) / 3600000);
@@ -243,6 +245,13 @@ async function fetchOutlookEvents(){
           suggested = suggestion.matched;
         }
 
+        const respRaw = (ev.responseStatus && ev.responseStatus.response) || "none";
+        const responseLabel = {
+          none: "", organizer: "Organizer", accepted: "Accepted",
+          tentativelyAccepted: "Tentative", notResponded: "Not yet responded",
+          declined: "Declined"
+        }[respRaw] || "";
+
         return {
           eventId: ev.id,
           accountEmail: account.username,
@@ -252,6 +261,7 @@ async function fetchOutlookEvents(){
           hours: Math.round(hours * 100) / 100,
           alreadyImported: importedIds.has(ev.id),
           selected: !importedIds.has(ev.id),
+          responseLabel,
           projectId, suggested, remembered
         };
       });
@@ -456,7 +466,7 @@ function renderImport(){
           <span class="mono" style="font-weight:500;color:var(--teal-dark);">${e.hours.toFixed(2)}h</span>
         </div>
         <div style="font-weight:500;font-size:.92rem;margin:4px 0 2px;">${escapeHtml(e.subject)}</div>
-        <div class="muted" style="margin-bottom:8px;">${escapeHtml(e.accountLabel)}</div>
+        <div class="muted" style="margin-bottom:8px;">${escapeHtml(e.accountLabel)}${e.responseLabel ? ' · ' + escapeHtml(e.responseLabel) : ''}</div>
         <select onchange="setEventProject(${i}, this.value)" ${e.alreadyImported?'disabled':''} style="width:100%;">${optionsWithSelection}</select>
         ${e.suggested ? `<div class="muted" style="margin-top:4px;">Suggested from event title</div>` : ""}
         ${e.remembered ? `<div class="muted" style="margin-top:4px;">Remembered from last time</div>` : ""}
