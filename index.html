@@ -205,6 +205,21 @@ function suggestProjectId(subject){
   return { id: active[0].id, matched:false };
 }
 
+async function fetchAllPages(firstUrl, headers){
+  let all = [];
+  let url = firstUrl;
+  let guard = 0;
+  while(url && guard < 50){ // guard against runaway pagination
+    const resp = await fetch(url, { headers });
+    if(!resp.ok) throw new Error(`Graph API error ${resp.status}`);
+    const data = await resp.json();
+    all = all.concat(data.value || []);
+    url = data["@odata.nextLink"] || null;
+    guard++;
+  }
+  return all;
+}
+
 async function fetchOutlookEvents(){
   if(state.accounts.length === 0) return;
   state.outlookStatus = "loading"; render();
@@ -221,12 +236,10 @@ async function fetchOutlookEvents(){
       const accountMeta = ALLOWED_ACCOUNTS.find(a => a.email.toLowerCase() === (account.username||"").toLowerCase());
       const token = await getTokenFor(account);
       if(!token) continue; // redirected away for interactive auth
-      const url = `https://graph.microsoft.com/v1.0/me/calendarview?startDateTime=${encodeURIComponent(start)}&endDateTime=${encodeURIComponent(end)}&$orderby=start/dateTime&$top=100&$select=id,subject,start,end,responseStatus,isCancelled`;
-      const resp = await fetch(url, { headers: { Authorization: `Bearer ${token}`, Prefer: 'outlook.timezone="UTC"' } });
-      if(!resp.ok) throw new Error(`Graph API error ${resp.status} for ${account.username}`);
-      const data = await resp.json();
+      const url = `https://graph.microsoft.com/v1.0/me/calendarview?startDateTime=${encodeURIComponent(start)}&endDateTime=${encodeURIComponent(end)}&$orderby=start/dateTime&$top=250&$select=id,subject,start,end,responseStatus,isCancelled`;
+      const allEvents = await fetchAllPages(url, { Authorization: `Bearer ${token}`, Prefer: 'outlook.timezone="UTC"' });
 
-      const mapped = (data.value || [])
+      const mapped = allEvents
         .filter(ev => !ev.isCancelled)
         .map(ev => {
         const startMs = new Date(ev.start.dateTime + "Z").getTime();
@@ -472,7 +485,8 @@ function renderImport(){
         ${e.remembered ? `<div class="muted" style="margin-top:4px;">Remembered from last time</div>` : ""}
       </div>`;
     }).join("");
-    eventsBlock = `<div style="margin-top:14px;">${rows}</div>
+    eventsBlock = `<p class="muted" style="margin-top:14px;">${state.outlookEvents.length} event${state.outlookEvents.length===1?'':'s'} found in this range.</p>
+      <div>${rows}</div>
       <button class="btn btn-brass" style="margin-top:12px;" onclick="importSelectedEvents()">Import selected as time entries</button>`;
   } else if(anySignedIn && state.outlookStatus!=="loading"){
     eventsBlock = `<p class="muted" style="margin-top:14px;">No events fetched yet — choose a date range and click "Fetch events".</p>`;
