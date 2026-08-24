@@ -201,7 +201,7 @@ async function fetchOutlookEvents(){
         hours: Math.round(hours * 100) / 100,
         alreadyImported: importedIds.has(ev.id),
         selected: !importedIds.has(ev.id),
-        projectId: state.projects[0]?.id || ""
+        projectId: (state.projects.filter(p=>!p.archived)[0] || {}).id || ""
       };
     });
     state.outlookStatus = "signed-in";
@@ -345,6 +345,13 @@ function renderProjects(){
 }
 
 function renderImport(){
+  const activeProjects = state.projects.filter(p=>!p.archived);
+  if(activeProjects.length === 0){
+    return `<div class="card" style="text-align:center;border-style:dashed;">
+      <p class="muted">Add at least one project before importing Outlook events — each event needs a project to be logged against.</p>
+      <button class="btn btn-brass" onclick="setTab('projects')">Go to Projects</button>
+    </div>`;
+  }
   const signedIn = state.outlookStatus === "signed-in" && state.account;
   let statusBanner = "";
   if(!state.config.clientId){
@@ -367,18 +374,30 @@ function renderImport(){
 
   let eventsBlock = "";
   if(signedIn && state.outlookEvents.length){
-    const options = state.projects.filter(p=>!p.archived).map(p=>`<option value="${p.id}">${escapeHtml(p.name)}</option>`).join("");
-    const rows = state.outlookEvents.map((e,i)=>`
-      <li style="opacity:${e.alreadyImported?0.5:1};">
-        <input type="checkbox" ${e.selected?'checked':''} ${e.alreadyImported?'disabled':''} onchange="toggleEventSelected(${i})">
-        <div style="flex:1;min-width:0;">
-          <div style="font-weight:500;font-size:.9rem;">${escapeHtml(e.subject)}</div>
-          <div class="muted">${e.date}${e.alreadyImported?' · already imported':''}</div>
-        </div>
-        <select onchange="setEventProject(${i}, this.value)" ${e.alreadyImported?'disabled':''} style="width:130px;">${options.replace(`value="${e.projectId}"`, `value="${e.projectId}" selected`)}</select>
-        <span class="mono" style="width:56px;text-align:right;">${e.hours.toFixed(2)}h</span>
-      </li>`).join("");
-    eventsBlock = `<ul class="list" style="margin-top:14px;">${rows}</ul>
+    const rows = state.outlookEvents.map((e,i)=>{
+      const pid = e.projectId && activeProjects.some(p=>p.id===e.projectId) ? e.projectId : activeProjects[0].id;
+      const optionsWithSelection = activeProjects.map(p=>`<option value="${p.id}" ${p.id===pid?'selected':''}>${escapeHtml(p.name)}</option>`).join("");
+      return `
+      <tr style="opacity:${e.alreadyImported?0.5:1};">
+        <td style="white-space:nowrap;vertical-align:top;padding-top:10px;">
+          <input type="checkbox" ${e.selected?'checked':''} ${e.alreadyImported?'disabled':''} onchange="toggleEventSelected(${i})" style="margin-right:6px;vertical-align:middle;">
+          ${e.date}
+        </td>
+        <td style="vertical-align:top;padding-top:8px;">
+          ${escapeHtml(e.subject)}${e.alreadyImported?'<div class="muted">already imported</div>':''}
+        </td>
+        <td style="vertical-align:top;">
+          <select onchange="setEventProject(${i}, this.value)" ${e.alreadyImported?'disabled':''} style="width:100%;">${optionsWithSelection}</select>
+        </td>
+        <td class="mono" style="text-align:right;white-space:nowrap;vertical-align:top;padding-top:10px;">${e.hours.toFixed(2)}h</td>
+      </tr>`;
+    }).join("");
+    eventsBlock = `<table style="margin-top:14px;">
+        <thead><tr>
+          <th>Date</th><th>Title</th><th>Project</th><th style="text-align:right;">Hours</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
       <button class="btn btn-brass" style="margin-top:12px;" onclick="importSelectedEvents()">Import selected as time entries</button>`;
   } else if(signedIn && state.outlookStatus!=="loading"){
     eventsBlock = `<p class="muted" style="margin-top:14px;">No events fetched yet — choose a date range and click "Fetch events".</p>`;
