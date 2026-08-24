@@ -83,13 +83,14 @@ let state = {
   config: store.get("ptl_config", { clientId:"045b88be-1e99-4d90-b246-961cc7f55edd", tenantId:"220a9668-fee3-4139-ad06-1fc06626dcc3" }),
   projects: store.get("ptl_projects", []),
   entries: store.get("ptl_entries", []),
+  eventChoices: store.get("ptl_event_choices", {}), // eventId -> projectId, remembered across reloads/refetches
   outlookEvents: [],
   outlookStatus: "idle", // idle | loading | signed-in | error
   outlookError: "",
   msal: null,
   account: null,
-  importFrom: todayISO(),
-  importTo: todayISO(),
+  importFrom: store.get("ptl_import_from", "2025-01-01"),
+  importTo: store.get("ptl_import_to", "2025-12-31"),
   reportSelected: null,
   reportFrom: "",
   reportTo: "",
@@ -98,6 +99,7 @@ let state = {
 
 function saveProjects(){ store.set("ptl_projects", state.projects); }
 function saveEntries(){ store.set("ptl_entries", state.entries); }
+function saveEventChoices(){ store.set("ptl_event_choices", state.eventChoices); }
 function saveConfig(){ store.set("ptl_config", state.config); }
 
 function projectById(id){ return state.projects.find(p=>p.id===id); }
@@ -205,11 +207,26 @@ async function fetchOutlookEvents(){
     if(!resp.ok) throw new Error(`Graph API error ${resp.status}`);
     const data = await resp.json();
     const importedIds = new Set(state.entries.filter(e=>e.source==="outlook").map(e=>e.eventId));
+    const importedProjectByEvent = {};
+    state.entries.filter(e=>e.source==="outlook").forEach(e=>{ importedProjectByEvent[e.eventId] = e.projectId; });
+    const activeIds = new Set(state.projects.filter(p=>!p.archived).map(p=>p.id));
     state.outlookEvents = (data.value || []).map(ev => {
       const startMs = new Date(ev.start.dateTime + "Z").getTime();
       const endMs = new Date(ev.end.dateTime + "Z").getTime();
       const hours = Math.max(0, (endMs - startMs) / 3600000);
-      const suggestion = suggestProjectId(ev.subject || "");
+
+      let projectId, suggested = false, remembered = false;
+      if(importedProjectByEvent[ev.id] && activeIds.has(importedProjectByEvent[ev.id])){
+        projectId = importedProjectByEvent[ev.id];
+      } else if(state.eventChoices[ev.id] && activeIds.has(state.eventChoices[ev.id])){
+        projectId = state.eventChoices[ev.id];
+        remembered = true;
+      } else {
+        const suggestion = suggestProjectId(ev.subject || "");
+        projectId = suggestion.id;
+        suggested = suggestion.matched;
+      }
+
       return {
         eventId: ev.id,
         subject: ev.subject || "(no subject)",
@@ -217,8 +234,7 @@ async function fetchOutlookEvents(){
         hours: Math.round(hours * 100) / 100,
         alreadyImported: importedIds.has(ev.id),
         selected: !importedIds.has(ev.id),
-        projectId: suggestion.id,
-        suggested: suggestion.matched
+        projectId, suggested, remembered
       };
     });
     state.outlookStatus = "signed-in";
@@ -236,8 +252,10 @@ function importSelectedEvents(){
       id: uid(), projectId: e.projectId, date: e.date, hours: e.hours,
       notes: e.subject, source: "outlook", eventId: e.eventId, createdAt: Date.now()
     });
+    state.eventChoices[e.eventId] = e.projectId;
   });
   saveEntries();
+  saveEventChoices();
   state.outlookEvents = state.outlookEvents.map(e => toImport.includes(e) ? { ...e, alreadyImported:true, selected:false } : e);
   render();
 }
@@ -406,6 +424,7 @@ function renderImport(){
         <div style="font-weight:500;font-size:.92rem;margin:4px 0 8px;">${escapeHtml(e.subject)}</div>
         <select onchange="setEventProject(${i}, this.value)" ${e.alreadyImported?'disabled':''} style="width:100%;">${optionsWithSelection}</select>
         ${e.suggested ? `<div class="muted" style="margin-top:4px;">Suggested from event title</div>` : ""}
+        ${e.remembered ? `<div class="muted" style="margin-top:4px;">Remembered from last time</div>` : ""}
       </div>`;
     }).join("");
     eventsBlock = `<div style="margin-top:14px;">${rows}</div>
@@ -526,10 +545,19 @@ function toggleReportProject(id){
 function setReportFrom(v){ state.reportFrom = v; render(); }
 function setReportTo(v){ state.reportTo = v; render(); }
 function toggleEventSelected(i){ state.outlookEvents[i].selected = !state.outlookEvents[i].selected; }
-function setEventProject(i, projectId){ state.outlookEvents[i].projectId = projectId; }
+function setEventProject(i, projectId){
+  state.outlookEvents[i].projectId = projectId;
+  state.outlookEvents[i].suggested = false;
+  state.outlookEvents[i].remembered = false;
+  const eventId = state.outlookEvents[i].eventId;
+  state.eventChoices[eventId] = projectId;
+  saveEventChoices();
+}
 function applyImportRangeAndFetch(){
   state.importFrom = document.getElementById("importFrom").value;
   state.importTo = document.getElementById("importTo").value;
+  store.set("ptl_import_from", state.importFrom);
+  store.set("ptl_import_to", state.importTo);
   fetchOutlookEvents();
 }
 function saveSettings(){
