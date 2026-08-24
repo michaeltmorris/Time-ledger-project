@@ -67,7 +67,10 @@
 <div class="wrap" id="app"></div>
 
 <script>
-const REQUIRED_ACCOUNT = "michael.morris@herringbone.ie";
+const ALLOWED_ACCOUNTS = [
+  { email: "michael.morris@herringbone.ie", label: "Herringbone" },
+  { email: "michael@michaelmorris.ie", label: "Michael Morris" }
+];
 const SWATCHES = ["#35564C","#A6772C","#5C6BC0","#9C4A3A","#7C8A3C","#6E5A8A","#3F7C8A"];
 const uid = () => Math.random().toString(36).slice(2,10) + Date.now().toString(36);
 const todayISO = () => new Date().toISOString().slice(0,10);
@@ -88,12 +91,12 @@ let state = {
   outlookStatus: "idle", // idle | loading | signed-in | error
   outlookError: "",
   msal: null,
-  account: null,
+  accounts: [], // array of msal AccountInfo for each signed-in allowed account
   importFrom: store.get("ptl_import_from", "2025-01-01"),
   importTo: store.get("ptl_import_to", "2025-12-31"),
   reportSelected: null,
-  reportFrom: "",
-  reportTo: "",
+  reportFrom: store.get("ptl_report_from", "2025-01-01"),
+  reportTo: store.get("ptl_report_to", "2025-12-31"),
   reportView: "table"
 };
 
@@ -110,9 +113,7 @@ function initMsal(){
   if(typeof msal === "undefined"){
     throw new Error("Microsoft sign-in library failed to load from the CDN. Check your internet connection or try reloading the page.");
   }
-  const authority = state.config.tenantId
-    ? `https://login.microsoftonline.com/${state.config.tenantId}`
-    : "https://login.microsoftonline.com/common";
+  const authority = "https://login.microsoftonline.com/common";
   state.msal = new msal.PublicClientApplication({
     auth: { clientId: state.config.clientId, authority, redirectUri: window.location.origin + window.location.pathname },
     cache: { cacheLocation: "localStorage" }
@@ -120,12 +121,16 @@ function initMsal(){
   return state.msal;
 }
 
-async function signIn(){
+function getSignedInAccount(email){
+  return state.accounts.find(a => (a.username||"").toLowerCase() === email.toLowerCase());
+}
+
+async function signInAccount(email){
   if(!state.config.clientId){ alert("Enter your Client ID in Settings first."); return; }
   try{
     const app = state.msal || initMsal();
     localStorage.setItem("ptl_return_tab", "import");
-    await app.loginRedirect({ scopes:["Calendars.Read","User.Read"], loginHint: REQUIRED_ACCOUNT, prompt:"select_account" });
+    await app.loginRedirect({ scopes:["Calendars.Read","User.Read"], loginHint: email, prompt:"select_account" });
     // page navigates away here on success; execution resumes in completeRedirect() on reload
   }catch(e){
     console.error("Sign-in failed:", e);
@@ -135,11 +140,10 @@ async function signIn(){
   }
 }
 
-async function signOut(){
+async function signOutAccount(email){
   const app = state.msal;
-  if(app && state.account){ await app.logoutRedirect({ account: state.account }); return; }
-  state.account = null; state.outlookStatus = "idle"; state.outlookEvents = [];
-  render();
+  const acc = getSignedInAccount(email);
+  if(app && acc){ await app.logoutRedirect({ account: acc }); return; }
 }
 
 async function completeRedirect(){
@@ -149,19 +153,24 @@ async function completeRedirect(){
     const res = await app.handleRedirectPromise();
     if(res && res.account){
       const email = (res.account.username || "").toLowerCase();
-      if(email !== REQUIRED_ACCOUNT.toLowerCase()){
+      const allowed = ALLOWED_ACCOUNTS.some(a => a.email.toLowerCase() === email);
+      if(!allowed){
         state.outlookStatus = "error";
-        state.outlookError = `Signed in as ${res.account.username}, but this app only accepts ${REQUIRED_ACCOUNT}. Please try again with the correct account.`;
+        state.outlookError = `Signed in as ${res.account.username}, but this app only accepts ${ALLOWED_ACCOUNTS.map(a=>a.email).join(" or ")}. Please try again with the correct account.`;
         await app.logoutRedirect({ account: res.account });
         return;
       }
-      state.account = res.account;
+      state.accounts = state.accounts.filter(a => (a.username||"").toLowerCase() !== email);
+      state.accounts.push(res.account);
       state.outlookStatus = "signed-in";
-    } else {
-      const accounts = app.getAllAccounts();
-      const match = accounts.find(a => (a.username||"").toLowerCase() === REQUIRED_ACCOUNT.toLowerCase());
-      if(match){ state.account = match; state.outlookStatus = "signed-in"; }
     }
+    // always resync from MSAL's cache too, in case of accounts already present from a prior session
+    const allAccounts = app.getAllAccounts();
+    ALLOWED_ACCOUNTS.forEach(a => {
+      const cached = allAccounts.find(acc => (acc.username||"").toLowerCase() === a.email.toLowerCase());
+      if(cached && !getSignedInAccount(a.email)) state.accounts.push(cached);
+    });
+    if(state.accounts.length) state.outlookStatus = "signed-in";
   }catch(e){
     state.outlookStatus = "error";
     state.outlookError = e.errorMessage || e.message || String(e);
@@ -171,14 +180,14 @@ async function completeRedirect(){
   render();
 }
 
-async function getToken(){
+async function getTokenFor(account){
   const app = state.msal;
   try{
-    const res = await app.acquireTokenSilent({ scopes:["Calendars.Read"], account: state.account });
+    const res = await app.acquireTokenSilent({ scopes:["Calendars.Read"], account });
     return res.accessToken;
   }catch(e){
     localStorage.setItem("ptl_return_tab", "import");
-    await app.acquireTokenRedirect({ scopes:["Calendars.Read"], account: state.account });
+    await app.acquireTokenRedirect({ scopes:["Calendars.Read"], account });
     // page navigates away here if silent acquisition failed
   }
 }
@@ -197,46 +206,59 @@ function suggestProjectId(subject){
 }
 
 async function fetchOutlookEvents(){
+  if(state.accounts.length === 0) return;
   state.outlookStatus = "loading"; render();
   try{
-    const token = await getToken();
     const start = new Date(state.importFrom + "T00:00:00").toISOString();
     const end = new Date(state.importTo + "T23:59:59").toISOString();
-    const url = `https://graph.microsoft.com/v1.0/me/calendarview?startDateTime=${encodeURIComponent(start)}&endDateTime=${encodeURIComponent(end)}&$orderby=start/dateTime&$top=100&$select=id,subject,start,end`;
-    const resp = await fetch(url, { headers: { Authorization: `Bearer ${token}`, Prefer: 'outlook.timezone="UTC"' } });
-    if(!resp.ok) throw new Error(`Graph API error ${resp.status}`);
-    const data = await resp.json();
     const importedIds = new Set(state.entries.filter(e=>e.source==="outlook").map(e=>e.eventId));
     const importedProjectByEvent = {};
     state.entries.filter(e=>e.source==="outlook").forEach(e=>{ importedProjectByEvent[e.eventId] = e.projectId; });
     const activeIds = new Set(state.projects.filter(p=>!p.archived).map(p=>p.id));
-    state.outlookEvents = (data.value || []).map(ev => {
-      const startMs = new Date(ev.start.dateTime + "Z").getTime();
-      const endMs = new Date(ev.end.dateTime + "Z").getTime();
-      const hours = Math.max(0, (endMs - startMs) / 3600000);
 
-      let projectId, suggested = false, remembered = false;
-      if(importedProjectByEvent[ev.id] && activeIds.has(importedProjectByEvent[ev.id])){
-        projectId = importedProjectByEvent[ev.id];
-      } else if(state.eventChoices[ev.id] && activeIds.has(state.eventChoices[ev.id])){
-        projectId = state.eventChoices[ev.id];
-        remembered = true;
-      } else {
-        const suggestion = suggestProjectId(ev.subject || "");
-        projectId = suggestion.id;
-        suggested = suggestion.matched;
-      }
+    let combined = [];
+    for(const account of state.accounts){
+      const accountMeta = ALLOWED_ACCOUNTS.find(a => a.email.toLowerCase() === (account.username||"").toLowerCase());
+      const token = await getTokenFor(account);
+      if(!token) continue; // redirected away for interactive auth
+      const url = `https://graph.microsoft.com/v1.0/me/calendarview?startDateTime=${encodeURIComponent(start)}&endDateTime=${encodeURIComponent(end)}&$orderby=start/dateTime&$top=100&$select=id,subject,start,end`;
+      const resp = await fetch(url, { headers: { Authorization: `Bearer ${token}`, Prefer: 'outlook.timezone="UTC"' } });
+      if(!resp.ok) throw new Error(`Graph API error ${resp.status} for ${account.username}`);
+      const data = await resp.json();
 
-      return {
-        eventId: ev.id,
-        subject: ev.subject || "(no subject)",
-        date: ev.start.dateTime.slice(0,10),
-        hours: Math.round(hours * 100) / 100,
-        alreadyImported: importedIds.has(ev.id),
-        selected: !importedIds.has(ev.id),
-        projectId, suggested, remembered
-      };
-    });
+      const mapped = (data.value || []).map(ev => {
+        const startMs = new Date(ev.start.dateTime + "Z").getTime();
+        const endMs = new Date(ev.end.dateTime + "Z").getTime();
+        const hours = Math.max(0, (endMs - startMs) / 3600000);
+
+        let projectId, suggested = false, remembered = false;
+        if(importedProjectByEvent[ev.id] && activeIds.has(importedProjectByEvent[ev.id])){
+          projectId = importedProjectByEvent[ev.id];
+        } else if(state.eventChoices[ev.id] && activeIds.has(state.eventChoices[ev.id])){
+          projectId = state.eventChoices[ev.id];
+          remembered = true;
+        } else {
+          const suggestion = suggestProjectId(ev.subject || "");
+          projectId = suggestion.id;
+          suggested = suggestion.matched;
+        }
+
+        return {
+          eventId: ev.id,
+          accountEmail: account.username,
+          accountLabel: accountMeta ? accountMeta.label : account.username,
+          subject: ev.subject || "(no subject)",
+          date: ev.start.dateTime.slice(0,10),
+          hours: Math.round(hours * 100) / 100,
+          alreadyImported: importedIds.has(ev.id),
+          selected: !importedIds.has(ev.id),
+          projectId, suggested, remembered
+        };
+      });
+      combined = combined.concat(mapped);
+    }
+    combined.sort((a,b)=> a.date < b.date ? -1 : (a.date > b.date ? 1 : 0));
+    state.outlookEvents = combined;
     state.outlookStatus = "signed-in";
   }catch(e){
     state.outlookStatus = "error";
@@ -250,7 +272,7 @@ function importSelectedEvents(){
   toImport.forEach(e=>{
     state.entries.unshift({
       id: uid(), projectId: e.projectId, date: e.date, hours: e.hours,
-      notes: e.subject, source: "outlook", eventId: e.eventId, createdAt: Date.now()
+      notes: e.subject, source: "outlook", eventId: e.eventId, account: e.accountEmail, createdAt: Date.now()
     });
     state.eventChoices[e.eventId] = e.projectId;
   });
@@ -387,19 +409,31 @@ function renderImport(){
       <button class="btn btn-brass" onclick="setTab('projects')">Go to Projects</button>
     </div>`;
   }
-  const signedIn = state.outlookStatus === "signed-in" && state.account;
-  let statusBanner = "";
+
+  const accountRows = ALLOWED_ACCOUNTS.map(a=>{
+    const acc = getSignedInAccount(a.email);
+    if(acc){
+      return `<div class="banner ok" style="display:flex;justify-content:space-between;align-items:center;">
+        <span>${a.label} — signed in as ${acc.username}</span>
+        <a href="#" onclick="signOutAccount('${a.email}');return false;">Sign out</a>
+      </div>`;
+    }
+    return `<div class="banner warn" style="display:flex;justify-content:space-between;align-items:center;">
+      <span>${a.label} — not signed in</span>
+      <button class="btn btn-teal" style="padding:5px 12px;" ${!state.config.clientId?'disabled':''} onclick="this.textContent='Redirecting…';this.disabled=true;signInAccount('${a.email}')">Sign in</button>
+    </div>`;
+  }).join("");
+
+  let errorBanner = "";
   if(!state.config.clientId){
-    statusBanner = `<div class="banner warn">Add your Azure Client ID in <a href="#" onclick="setTab('settings');return false;">Settings</a> first.</div>`;
+    errorBanner = `<div class="banner warn">Add your Azure Client ID in <a href="#" onclick="setTab('settings');return false;">Settings</a> first.</div>`;
   } else if(state.outlookStatus === "error"){
-    statusBanner = `<div class="banner err">${escapeHtml(state.outlookError)}</div>`;
-  } else if(signedIn){
-    statusBanner = `<div class="banner ok">Signed in as ${state.account.username}. <a href="#" onclick="signOut();return false;">Sign out</a></div>`;
+    errorBanner = `<div class="banner err">${escapeHtml(state.outlookError)}</div>`;
   }
 
-  const signInBlock = !signedIn ? `<button class="btn btn-teal" ${!state.config.clientId?'disabled':''} onclick="this.textContent='Redirecting…';this.disabled=true;signIn()">Sign in to Outlook</button>` : "";
+  const anySignedIn = state.accounts.length > 0;
 
-  const rangeBlock = signedIn ? `
+  const rangeBlock = anySignedIn ? `
     <div class="row" style="margin:14px 0;">
       <div><label>From</label><input type="date" id="importFrom" value="${state.importFrom}"></div>
       <div><label>To</label><input type="date" id="importTo" value="${state.importTo}"></div>
@@ -408,7 +442,7 @@ function renderImport(){
   ` : "";
 
   let eventsBlock = "";
-  if(signedIn && state.outlookEvents.length){
+  if(anySignedIn && state.outlookEvents.length){
     const rows = state.outlookEvents.map((e,i)=>{
       const pid = e.projectId && activeProjects.some(p=>p.id===e.projectId) ? e.projectId : activeProjects[0].id;
       const optionsWithSelection = activeProjects.map(p=>`<option value="${p.id}" ${p.id===pid?'selected':''}>${escapeHtml(p.name)}</option>`).join("");
@@ -421,7 +455,8 @@ function renderImport(){
           </label>
           <span class="mono" style="font-weight:500;color:var(--teal-dark);">${e.hours.toFixed(2)}h</span>
         </div>
-        <div style="font-weight:500;font-size:.92rem;margin:4px 0 8px;">${escapeHtml(e.subject)}</div>
+        <div style="font-weight:500;font-size:.92rem;margin:4px 0 2px;">${escapeHtml(e.subject)}</div>
+        <div class="muted" style="margin-bottom:8px;">${escapeHtml(e.accountLabel)}</div>
         <select onchange="setEventProject(${i}, this.value)" ${e.alreadyImported?'disabled':''} style="width:100%;">${optionsWithSelection}</select>
         ${e.suggested ? `<div class="muted" style="margin-top:4px;">Suggested from event title</div>` : ""}
         ${e.remembered ? `<div class="muted" style="margin-top:4px;">Remembered from last time</div>` : ""}
@@ -429,7 +464,7 @@ function renderImport(){
     }).join("");
     eventsBlock = `<div style="margin-top:14px;">${rows}</div>
       <button class="btn btn-brass" style="margin-top:12px;" onclick="importSelectedEvents()">Import selected as time entries</button>`;
-  } else if(signedIn && state.outlookStatus!=="loading"){
+  } else if(anySignedIn && state.outlookStatus!=="loading"){
     eventsBlock = `<p class="muted" style="margin-top:14px;">No events fetched yet — choose a date range and click "Fetch events".</p>`;
   }
   if(state.outlookStatus === "loading"){
@@ -437,12 +472,12 @@ function renderImport(){
   }
 
   return `<div class="card">
-    ${statusBanner}
-    ${signInBlock}
+    <div style="display:flex;flex-direction:column;gap:8px;">${accountRows}</div>
+    ${errorBanner ? `<div style="margin-top:10px;">${errorBanner}</div>` : ""}
     ${rangeBlock}
     ${eventsBlock}
   </div>
-  <p class="muted">Only ${REQUIRED_ACCOUNT} can sign in here. Duration is calculated from each event's start and end time — adjust the project per event before importing.</p>`;
+  <p class="muted">Only ${ALLOWED_ACCOUNTS.map(a=>a.email).join(" and ")} can sign in here. Events from both accounts are combined into one list — duration is calculated from each event's start and end time, and you can adjust the project per event before importing.</p>`;
 }
 
 function renderReports(){
@@ -502,7 +537,7 @@ function renderSettings(){
     <div style="height:14px;"></div>
     <button class="btn btn-brass" onclick="saveSettings()">Save</button>
     <p class="muted" style="margin-top:16px;">Redirect URI must be registered in Azure as: <span class="mono">${window.location.origin + window.location.pathname}</span></p>
-    <p class="muted">Restricted to sign-in as <strong>${REQUIRED_ACCOUNT}</strong> only.</p>
+    <p class="muted">Restricted to sign-in as <strong>${ALLOWED_ACCOUNTS.map(a=>a.email).join("</strong> or <strong>")}</strong> only.</p>
   </div>`;
 }
 
@@ -542,8 +577,8 @@ function toggleReportProject(id){
   state.reportSelected.has(id) ? state.reportSelected.delete(id) : state.reportSelected.add(id);
   render();
 }
-function setReportFrom(v){ state.reportFrom = v; render(); }
-function setReportTo(v){ state.reportTo = v; render(); }
+function setReportFrom(v){ state.reportFrom = v; store.set("ptl_report_from", v); render(); }
+function setReportTo(v){ state.reportTo = v; store.set("ptl_report_to", v); render(); }
 function toggleEventSelected(i){ state.outlookEvents[i].selected = !state.outlookEvents[i].selected; }
 function setEventProject(i, projectId){
   state.outlookEvents[i].projectId = projectId;
