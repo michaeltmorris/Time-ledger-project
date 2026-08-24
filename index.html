@@ -1,1 +1,520 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Project Time Ledger</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap">
+<script src="https://alcdn.msauth.net/browser/2.38.3/js/msal-browser.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+  :root{
+    --paper:#EFEEE4; --paper-raised:#F7F6EF; --ink:#20261F; --ink-soft:#5B6259;
+    --brass:#A6772C; --teal:#35564C; --teal-dark:#233B34; --border:#D9D7C8; --rust:#9C4A3A;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;background:var(--paper);color:var(--ink);font-family:Inter,sans-serif;}
+  .wrap{max-width:720px;margin:0 auto;padding:0 16px 96px;}
+  header{position:sticky;top:0;background:var(--paper-raised);border-bottom:1px solid var(--border);z-index:10;}
+  header .inner{max-width:720px;margin:0 auto;padding:18px 16px 0;}
+  h1{font-family:'Source Serif 4',serif;font-size:1.25rem;margin:0 0 14px;display:flex;align-items:center;gap:8px;}
+  nav{display:flex;gap:2px;overflow-x:auto;}
+  nav button{background:none;border:none;border-bottom:2px solid transparent;color:var(--ink-soft);
+    padding:10px 12px;font-size:.85rem;font-weight:500;cursor:pointer;white-space:nowrap;}
+  nav button.active{color:var(--teal-dark);border-bottom-color:var(--brass);}
+  .card{background:var(--paper-raised);border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:20px;}
+  label{display:block;font-size:.75rem;font-weight:500;color:var(--ink-soft);margin-bottom:4px;}
+  input,select{width:100%;border:1px solid var(--border);border-radius:6px;padding:8px 10px;font-size:.9rem;background:#fff;font-family:inherit;}
+  .row{display:flex;gap:10px;}
+  .row > *{flex:1;}
+  .btn{display:inline-flex;align-items:center;gap:6px;border:none;border-radius:6px;padding:9px 16px;
+    font-size:.85rem;font-weight:500;cursor:pointer;}
+  .btn-brass{background:var(--brass);color:#fff;}
+  .btn-teal{background:var(--teal);color:#fff;}
+  .btn-ghost{background:#fff;border:1px solid var(--border);color:var(--ink-soft);}
+  .btn:disabled{opacity:.5;cursor:not-allowed;}
+  .mono{font-family:'JetBrains Mono',monospace;}
+  ul.list{list-style:none;margin:0;padding:0;}
+  ul.list li{display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--border);}
+  .dot{width:9px;height:9px;border-radius:50%;flex-shrink:0;}
+  .muted{color:var(--ink-soft);font-size:.8rem;}
+  .pill{border-radius:999px;border:1px solid var(--border);padding:4px 10px;font-size:.75rem;font-weight:500;cursor:pointer;background:#fff;color:var(--ink-soft);}
+  .pill.on{color:#fff;}
+  table{width:100%;border-collapse:collapse;font-size:.9rem;}
+  th,td{text-align:left;padding:8px 0;border-bottom:1px solid var(--border);}
+  th{color:var(--ink-soft);font-weight:500;font-size:.75rem;text-transform:uppercase;}
+  .stamp{border:2px solid var(--rust);color:var(--rust);border-radius:6px;padding:4px 10px;
+    font-size:.7rem;font-weight:600;text-transform:uppercase;letter-spacing:.08em;transform:rotate(-6deg);display:inline-block;}
+  .icon-btn{background:none;border:none;color:var(--ink-soft);cursor:pointer;padding:2px;}
+  .swatch{width:20px;height:20px;border-radius:50%;border:none;cursor:pointer;}
+  .swatch.selected{outline:2px solid var(--ink);outline-offset:2px;}
+  .banner{padding:10px 14px;border-radius:6px;font-size:.85rem;margin-bottom:14px;}
+  .banner.warn{background:#F5E9D9;color:#7A5416;border:1px solid #E4C99A;}
+  .banner.err{background:#F6E3DF;color:#7A2E1E;border:1px solid #E7B8AB;}
+  .banner.ok{background:#E5EEE9;color:#1F4235;border:1px solid #BFD9CB;}
+  a{color:var(--teal-dark);}
+</style>
+</head>
+<body>
+<header>
+  <div class="inner">
+    <h1>📒 Project Time Ledger</h1>
+    <nav id="nav"></nav>
+  </div>
+</header>
+<div class="wrap" id="app"></div>
 
+<script>
+const REQUIRED_ACCOUNT = "michael.morris@herringbone.ie";
+const SWATCHES = ["#35564C","#A6772C","#5C6BC0","#9C4A3A","#7C8A3C","#6E5A8A","#3F7C8A"];
+const uid = () => Math.random().toString(36).slice(2,10) + Date.now().toString(36);
+const todayISO = () => new Date().toISOString().slice(0,10);
+
+// ---------- persistence (plain localStorage; this is a self-hosted file, not a Claude artifact) ----------
+const store = {
+  get(key, fallback){ try{ const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; }catch(e){ return fallback; } },
+  set(key, val){ localStorage.setItem(key, JSON.stringify(val)); }
+};
+
+let state = {
+  tab: "log",
+  config: store.get("ptl_config", { clientId:"045b88be-1e99-4d90-b246-961cc7f55edd", tenantId:"220a9668-fee3-4139-ad06-1fc06626dcc3" }),
+  projects: store.get("ptl_projects", []),
+  entries: store.get("ptl_entries", []),
+  outlookEvents: [],
+  outlookStatus: "idle", // idle | loading | signed-in | error
+  outlookError: "",
+  msal: null,
+  account: null,
+  importFrom: todayISO(),
+  importTo: todayISO(),
+  reportSelected: null,
+  reportFrom: "",
+  reportTo: "",
+  reportView: "table"
+};
+
+function saveProjects(){ store.set("ptl_projects", state.projects); }
+function saveEntries(){ store.set("ptl_entries", state.entries); }
+function saveConfig(){ store.set("ptl_config", state.config); }
+
+function projectById(id){ return state.projects.find(p=>p.id===id); }
+
+// ---------- MSAL / Graph ----------
+function initMsal(){
+  if(!state.config.clientId) return null;
+  if(typeof msal === "undefined"){
+    throw new Error("Microsoft sign-in library failed to load from the CDN. Check your internet connection or try reloading the page.");
+  }
+  const authority = state.config.tenantId
+    ? `https://login.microsoftonline.com/${state.config.tenantId}`
+    : "https://login.microsoftonline.com/common";
+  state.msal = new msal.PublicClientApplication({
+    auth: { clientId: state.config.clientId, authority, redirectUri: window.location.origin + window.location.pathname },
+    cache: { cacheLocation: "localStorage" }
+  });
+  return state.msal;
+}
+
+async function signIn(){
+  if(!state.config.clientId){ alert("Enter your Client ID in Settings first."); return; }
+  const app = state.msal || initMsal();
+  state.outlookStatus = "loading"; state.outlookError = ""; render();
+  try{
+    const res = await app.loginPopup({ scopes:["Calendars.Read","User.Read"], loginHint: REQUIRED_ACCOUNT, prompt:"select_account" });
+    const email = (res.account.username || "").toLowerCase();
+    if(email !== REQUIRED_ACCOUNT.toLowerCase()){
+      await app.logoutPopup({ account: res.account });
+      state.outlookStatus = "error";
+      state.outlookError = `Signed in as ${res.account.username}, but this app only accepts ${REQUIRED_ACCOUNT}. Signed out — please try again with the correct account.`;
+      state.account = null;
+    } else {
+      state.account = res.account;
+      state.outlookStatus = "signed-in";
+    }
+  }catch(e){
+    state.outlookStatus = "error";
+    state.outlookError = e.errorMessage || e.message || String(e);
+  }
+  render();
+}
+
+async function signOut(){
+  const app = state.msal;
+  if(app && state.account){ try{ await app.logoutPopup({ account: state.account }); }catch(e){} }
+  state.account = null; state.outlookStatus = "idle"; state.outlookEvents = [];
+  render();
+}
+
+async function getToken(){
+  const app = state.msal;
+  try{
+    const res = await app.acquireTokenSilent({ scopes:["Calendars.Read"], account: state.account });
+    return res.accessToken;
+  }catch(e){
+    const res = await app.acquireTokenPopup({ scopes:["Calendars.Read"], account: state.account });
+    return res.accessToken;
+  }
+}
+
+async function fetchOutlookEvents(){
+  state.outlookStatus = "loading"; render();
+  try{
+    const token = await getToken();
+    const start = new Date(state.importFrom + "T00:00:00").toISOString();
+    const end = new Date(state.importTo + "T23:59:59").toISOString();
+    const url = `https://graph.microsoft.com/v1.0/me/calendarview?startDateTime=${encodeURIComponent(start)}&endDateTime=${encodeURIComponent(end)}&$orderby=start/dateTime&$top=100&$select=id,subject,start,end`;
+    const resp = await fetch(url, { headers: { Authorization: `Bearer ${token}`, Prefer: 'outlook.timezone="UTC"' } });
+    if(!resp.ok) throw new Error(`Graph API error ${resp.status}`);
+    const data = await resp.json();
+    const importedIds = new Set(state.entries.filter(e=>e.source==="outlook").map(e=>e.eventId));
+    state.outlookEvents = (data.value || []).map(ev => {
+      const startMs = new Date(ev.start.dateTime + "Z").getTime();
+      const endMs = new Date(ev.end.dateTime + "Z").getTime();
+      const hours = Math.max(0, (endMs - startMs) / 3600000);
+      return {
+        eventId: ev.id,
+        subject: ev.subject || "(no subject)",
+        date: ev.start.dateTime.slice(0,10),
+        hours: Math.round(hours * 100) / 100,
+        alreadyImported: importedIds.has(ev.id),
+        selected: !importedIds.has(ev.id),
+        projectId: state.projects[0]?.id || ""
+      };
+    });
+    state.outlookStatus = "signed-in";
+  }catch(e){
+    state.outlookStatus = "error";
+    state.outlookError = e.message || String(e);
+  }
+  render();
+}
+
+function importSelectedEvents(){
+  const toImport = state.outlookEvents.filter(e => e.selected && !e.alreadyImported && e.projectId);
+  toImport.forEach(e=>{
+    state.entries.unshift({
+      id: uid(), projectId: e.projectId, date: e.date, hours: e.hours,
+      notes: e.subject, source: "outlook", eventId: e.eventId, createdAt: Date.now()
+    });
+  });
+  saveEntries();
+  state.outlookEvents = state.outlookEvents.map(e => toImport.includes(e) ? { ...e, alreadyImported:true, selected:false } : e);
+  render();
+}
+
+// ---------- CRUD ----------
+function addProject(name, color){
+  state.projects.push({ id: uid(), name: name.trim(), color, archived:false });
+  saveProjects(); render();
+}
+function updateProject(id, patch){
+  state.projects = state.projects.map(p => p.id===id ? {...p, ...patch} : p);
+  saveProjects(); render();
+}
+function deleteProject(id){
+  state.projects = state.projects.filter(p=>p.id!==id);
+  saveProjects(); render();
+}
+function addEntry(entry){
+  state.entries.unshift({ id: uid(), createdAt: Date.now(), source:"manual", ...entry });
+  saveEntries(); render();
+}
+function deleteEntry(id){
+  state.entries = state.entries.filter(e=>e.id!==id);
+  saveEntries(); render();
+}
+
+// ---------- rendering ----------
+function setTab(t){ state.tab = t; render(); }
+
+function render(){
+  document.getElementById("nav").innerHTML = ["log","projects","import","reports","settings"].map(t => {
+    const labels = { log:"Log time", projects:"Projects", import:"Import from Outlook", reports:"Reports", settings:"Settings" };
+    return `<button class="${state.tab===t?'active':''}" onclick="setTab('${t}')">${labels[t]}</button>`;
+  }).join("");
+
+  const app = document.getElementById("app");
+  if(state.tab==="log") app.innerHTML = renderLog();
+  if(state.tab==="projects") app.innerHTML = renderProjects();
+  if(state.tab==="import") app.innerHTML = renderImport();
+  if(state.tab==="reports") app.innerHTML = renderReports();
+  if(state.tab==="settings") app.innerHTML = renderSettings();
+  wireTabEvents();
+}
+
+function renderLog(){
+  const active = state.projects.filter(p=>!p.archived);
+  if(active.length===0){
+    return `<div class="card" style="text-align:center;border-style:dashed;">
+      <p class="muted">No projects yet. Add one in the Projects tab before logging time.</p>
+      <button class="btn btn-brass" onclick="setTab('projects')">Go to Projects</button>
+    </div>`;
+  }
+  const options = active.map(p=>`<option value="${p.id}">${p.name}</option>`).join("");
+  const recent = state.entries.slice(0,10).map(e=>{
+    const p = projectById(e.projectId);
+    return `<li>
+      <span class="dot" style="background:${p?p.color:'#999'}"></span>
+      <div style="flex:1;min-width:0;">
+        <div style="font-weight:500;font-size:.9rem;">${p?p.name:'Deleted project'}</div>
+        ${e.notes ? `<div class="muted">${escapeHtml(e.notes)}</div>` : ""}
+      </div>
+      <div class="muted">${e.date}${e.source==='outlook'?' · Outlook':''}</div>
+      <div class="mono" style="width:60px;text-align:right;font-weight:500;color:var(--teal-dark);">${e.hours.toFixed(2)}h</div>
+      <button class="icon-btn" onclick="deleteEntry('${e.id}')">✕</button>
+    </li>`;
+  }).join("") || `<p class="muted">Nothing logged yet.</p>`;
+
+  return `
+  <form class="card" id="logForm">
+    <div class="row" style="margin-bottom:10px;">
+      <div style="flex:2;"><label>Project</label><select id="logProject">${options}</select></div>
+    </div>
+    <div class="row" style="margin-bottom:10px;">
+      <div><label>Date</label><input type="date" id="logDate" value="${todayISO()}"></div>
+      <div><label>Hours</label><input type="number" step="0.25" min="0" id="logHours" placeholder="e.g. 1.5" class="mono"></div>
+    </div>
+    <div style="margin-bottom:12px;"><label>Notes (optional)</label><input type="text" id="logNotes" placeholder="What did you work on?"></div>
+    <div id="logError" class="banner err" style="display:none;"></div>
+    <button type="submit" class="btn btn-brass">+ Log entry</button>
+  </form>
+  <h2 style="font-size:.75rem;text-transform:uppercase;color:var(--ink-soft);margin-bottom:8px;">Recent entries</h2>
+  <ul class="list">${recent}</ul>`;
+}
+
+function renderProjects(){
+  const active = state.projects.filter(p=>!p.archived);
+  const archived = state.projects.filter(p=>p.archived);
+  const usage = {};
+  state.entries.forEach(e=> usage[e.projectId] = (usage[e.projectId]||0)+1 );
+
+  const swatches = SWATCHES.map((c,i)=>`<button type="button" class="swatch ${i===0?'selected':''}" style="background:${c}" data-color="${c}" onclick="pickSwatch(this)"></button>`).join("");
+
+  const activeList = active.map(p=>`<li>
+    <span class="dot" style="background:${p.color}"></span>
+    <span style="flex:1;font-weight:500;font-size:.9rem;">${escapeHtml(p.name)}</span>
+    <span class="muted">${usage[p.id]||0} ${usage[p.id]===1?'entry':'entries'}</span>
+    <button class="icon-btn" onclick="renameProjectPrompt('${p.id}')">✎</button>
+    <button class="icon-btn" onclick="updateProject('${p.id}',{archived:true})" title="Archive">🗄</button>
+  </li>`).join("") || `<p class="muted">No active projects.</p>`;
+
+  const archivedList = archived.map(p=>`<li style="opacity:.7;">
+    <span class="dot" style="background:${p.color}"></span>
+    <span style="flex:1;font-size:.9rem;">${escapeHtml(p.name)}</span>
+    <button class="icon-btn" onclick="updateProject('${p.id}',{archived:false})" title="Restore">↺</button>
+    <button class="icon-btn" onclick="if(confirm('Delete this project permanently? Its past time entries will remain but show as Deleted project.')) deleteProject('${p.id}')">🗑</button>
+  </li>`).join("");
+
+  return `
+  <form class="card" id="projectForm">
+    <label>New project</label>
+    <div class="row" style="margin-bottom:10px;">
+      <input type="text" id="newProjectName" placeholder="Project name">
+      <button type="submit" class="btn btn-brass" style="flex:0 0 auto;">+ Add</button>
+    </div>
+    <label>Colour</label>
+    <div style="display:flex;gap:8px;">${swatches}</div>
+  </form>
+  <h2 style="font-size:.75rem;text-transform:uppercase;color:var(--ink-soft);margin-bottom:8px;">Active projects</h2>
+  <ul class="list">${activeList}</ul>
+  ${archived.length ? `<h2 style="font-size:.75rem;text-transform:uppercase;color:var(--ink-soft);margin:20px 0 8px;">Archived</h2><ul class="list">${archivedList}</ul>` : ""}
+  <p class="muted" style="margin-top:16px;">Archiving hides a project from Log Time without losing its history.</p>`;
+}
+
+function renderImport(){
+  const signedIn = state.outlookStatus === "signed-in" && state.account;
+  let statusBanner = "";
+  if(!state.config.clientId){
+    statusBanner = `<div class="banner warn">Add your Azure Client ID in <a href="#" onclick="setTab('settings');return false;">Settings</a> first.</div>`;
+  } else if(state.outlookStatus === "error"){
+    statusBanner = `<div class="banner err">${escapeHtml(state.outlookError)}</div>`;
+  } else if(signedIn){
+    statusBanner = `<div class="banner ok">Signed in as ${state.account.username}. <a href="#" onclick="signOut();return false;">Sign out</a></div>`;
+  }
+
+  const signInBlock = !signedIn ? `<button class="btn btn-teal" ${!state.config.clientId?'disabled':''} onclick="signIn()">Sign in to Outlook</button>` : "";
+
+  const rangeBlock = signedIn ? `
+    <div class="row" style="margin:14px 0;">
+      <div><label>From</label><input type="date" id="importFrom" value="${state.importFrom}"></div>
+      <div><label>To</label><input type="date" id="importTo" value="${state.importTo}"></div>
+    </div>
+    <button class="btn btn-teal" onclick="applyImportRangeAndFetch()">Fetch events</button>
+  ` : "";
+
+  let eventsBlock = "";
+  if(signedIn && state.outlookEvents.length){
+    const options = state.projects.filter(p=>!p.archived).map(p=>`<option value="${p.id}">${escapeHtml(p.name)}</option>`).join("");
+    const rows = state.outlookEvents.map((e,i)=>`
+      <li style="opacity:${e.alreadyImported?0.5:1};">
+        <input type="checkbox" ${e.selected?'checked':''} ${e.alreadyImported?'disabled':''} onchange="toggleEventSelected(${i})">
+        <div style="flex:1;min-width:0;">
+          <div style="font-weight:500;font-size:.9rem;">${escapeHtml(e.subject)}</div>
+          <div class="muted">${e.date}${e.alreadyImported?' · already imported':''}</div>
+        </div>
+        <select onchange="setEventProject(${i}, this.value)" ${e.alreadyImported?'disabled':''} style="width:130px;">${options.replace(`value="${e.projectId}"`, `value="${e.projectId}" selected`)}</select>
+        <span class="mono" style="width:56px;text-align:right;">${e.hours.toFixed(2)}h</span>
+      </li>`).join("");
+    eventsBlock = `<ul class="list" style="margin-top:14px;">${rows}</ul>
+      <button class="btn btn-brass" style="margin-top:12px;" onclick="importSelectedEvents()">Import selected as time entries</button>`;
+  } else if(signedIn && state.outlookStatus!=="loading"){
+    eventsBlock = `<p class="muted" style="margin-top:14px;">No events fetched yet — choose a date range and click "Fetch events".</p>`;
+  }
+  if(state.outlookStatus === "loading"){
+    eventsBlock = `<p class="muted" style="margin-top:14px;">Working…</p>`;
+  }
+
+  return `<div class="card">
+    ${statusBanner}
+    ${signInBlock}
+    ${rangeBlock}
+    ${eventsBlock}
+  </div>
+  <p class="muted">Only ${REQUIRED_ACCOUNT} can sign in here. Duration is calculated from each event's start and end time — adjust the project per event before importing.</p>`;
+}
+
+function renderReports(){
+  if(state.reportSelected === null) state.reportSelected = new Set(state.projects.map(p=>p.id));
+  const pills = state.projects.map(p=>{
+    const on = state.reportSelected.has(p.id);
+    return `<button type="button" class="pill ${on?'on':''}" style="${on?`background:${p.color};border-color:${p.color};`:''}" onclick="toggleReportProject('${p.id}')">${escapeHtml(p.name)}${p.archived?' (archived)':''}</button>`;
+  }).join(" ");
+
+  const filtered = state.entries.filter(e=>{
+    if(!state.reportSelected.has(e.projectId)) return false;
+    if(state.reportFrom && e.date < state.reportFrom) return false;
+    if(state.reportTo && e.date > state.reportTo) return false;
+    return true;
+  });
+  const totals = {};
+  filtered.forEach(e=> totals[e.projectId] = (totals[e.projectId]||0) + e.hours );
+  const totalRows = Object.entries(totals).map(([id,hours])=>({id,hours,name:projectById(id)?.name||"Deleted project",color:projectById(id)?.color||"#999"}))
+    .sort((a,b)=>b.hours-a.hours);
+  const grand = totalRows.reduce((s,t)=>s+t.hours,0);
+
+  const tableRows = totalRows.map(t=>`<tr>
+    <td><span class="dot" style="background:${t.color};display:inline-block;margin-right:6px;"></span>${escapeHtml(t.name)}</td>
+    <td class="mono" style="text-align:right;">${t.hours.toFixed(2)}h</td>
+  </tr>`).join("") || `<tr><td colspan="2" class="muted">No entries match this filter.</td></tr>`;
+
+  return `<div class="card">
+    <label>Projects</label>
+    <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px;">${pills}</div>
+    <div class="row">
+      <div><label>From</label><input type="date" id="reportFrom" value="${state.reportFrom}" onchange="setReportFrom(this.value)"></div>
+      <div><label>To</label><input type="date" id="reportTo" value="${state.reportTo}" onchange="setReportTo(this.value)"></div>
+    </div>
+  </div>
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+    <div>
+      <div class="muted" style="text-transform:uppercase;font-size:.7rem;">Total for selection</div>
+      <div class="mono" style="font-size:1.8rem;font-weight:600;color:var(--teal-dark);">${grand.toFixed(2)}h</div>
+    </div>
+    <div class="stamp">${filtered.length} ${filtered.length===1?'entry':'entries'}</div>
+  </div>
+  <div style="display:flex;gap:8px;margin-bottom:14px;">
+    <button class="btn btn-ghost" onclick="exportExcel()">⬇ Export to Excel</button>
+  </div>
+  <table><thead><tr><th>Project</th><th style="text-align:right;">Hours</th></tr></thead><tbody>${tableRows}</tbody></table>`;
+}
+
+function renderSettings(){
+  return `<div class="card">
+    <h2 style="font-family:'Source Serif 4',serif;font-size:1.05rem;margin-top:0;">Microsoft Graph connection</h2>
+    <p class="muted">Paste in the values from your Azure app registration. These stay on this device only.</p>
+    <label>Application (client) ID</label>
+    <input type="text" id="cfgClientId" value="${escapeHtml(state.config.clientId)}" placeholder="e.g. 3fa1c2...">
+    <div style="height:10px;"></div>
+    <label>Directory (tenant) ID</label>
+    <input type="text" id="cfgTenantId" value="${escapeHtml(state.config.tenantId)}" placeholder="e.g. 8b29a1...">
+    <div style="height:14px;"></div>
+    <button class="btn btn-brass" onclick="saveSettings()">Save</button>
+    <p class="muted" style="margin-top:16px;">Redirect URI must be registered in Azure as: <span class="mono">${window.location.origin + window.location.pathname}</span></p>
+    <p class="muted">Restricted to sign-in as <strong>${REQUIRED_ACCOUNT}</strong> only.</p>
+  </div>`;
+}
+
+// ---------- event wiring ----------
+function wireTabEvents(){
+  const logForm = document.getElementById("logForm");
+  if(logForm) logForm.onsubmit = (e)=>{
+    e.preventDefault();
+    const projectId = document.getElementById("logProject").value;
+    const date = document.getElementById("logDate").value;
+    const hours = parseFloat(document.getElementById("logHours").value);
+    const notes = document.getElementById("logNotes").value.trim();
+    const err = document.getElementById("logError");
+    if(!hours || hours<=0){ err.style.display="block"; err.textContent="Enter hours greater than 0."; return; }
+    err.style.display="none";
+    addEntry({ projectId, date, hours, notes });
+  };
+  const pForm = document.getElementById("projectForm");
+  if(pForm) pForm.onsubmit = (e)=>{
+    e.preventDefault();
+    const name = document.getElementById("newProjectName").value;
+    if(!name.trim()) return;
+    const selected = document.querySelector(".swatch.selected");
+    addProject(name, selected ? selected.dataset.color : SWATCHES[0]);
+  };
+}
+function pickSwatch(el){
+  document.querySelectorAll(".swatch").forEach(s=>s.classList.remove("selected"));
+  el.classList.add("selected");
+}
+function renameProjectPrompt(id){
+  const p = projectById(id);
+  const name = prompt("Rename project", p.name);
+  if(name && name.trim()) updateProject(id, { name: name.trim() });
+}
+function toggleReportProject(id){
+  state.reportSelected.has(id) ? state.reportSelected.delete(id) : state.reportSelected.add(id);
+  render();
+}
+function setReportFrom(v){ state.reportFrom = v; render(); }
+function setReportTo(v){ state.reportTo = v; render(); }
+function toggleEventSelected(i){ state.outlookEvents[i].selected = !state.outlookEvents[i].selected; }
+function setEventProject(i, projectId){ state.outlookEvents[i].projectId = projectId; }
+function applyImportRangeAndFetch(){
+  state.importFrom = document.getElementById("importFrom").value;
+  state.importTo = document.getElementById("importTo").value;
+  fetchOutlookEvents();
+}
+function saveSettings(){
+  state.config.clientId = document.getElementById("cfgClientId").value.trim();
+  state.config.tenantId = document.getElementById("cfgTenantId").value.trim();
+  saveConfig();
+  state.msal = null; // force re-init with new config
+  alert("Saved. You can now sign in from the Import tab.");
+}
+function exportExcel(){
+  const filtered = state.entries.filter(e=>{
+    if(!state.reportSelected.has(e.projectId)) return false;
+    if(state.reportFrom && e.date < state.reportFrom) return false;
+    if(state.reportTo && e.date > state.reportTo) return false;
+    return true;
+  });
+  const detail = filtered.slice().sort((a,b)=> a.date<b.date?-1:1).map(e=>({
+    Date: e.date, Project: projectById(e.projectId)?.name || "Deleted project",
+    Hours: e.hours, Notes: e.notes || "", Source: e.source || "manual"
+  }));
+  const totals = {};
+  filtered.forEach(e=> totals[e.projectId] = (totals[e.projectId]||0)+e.hours );
+  const summary = Object.entries(totals).map(([id,hours])=>({ Project: projectById(id)?.name||"Deleted project", "Total hours": hours }));
+  summary.push({ Project:"Grand total", "Total hours": summary.reduce((s,r)=>s+r["Total hours"],0) });
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(summary), "Summary");
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(detail), "Time entries");
+  XLSX.writeFile(wb, `time-report-${todayISO()}.xlsx`);
+}
+function escapeHtml(s){ return String(s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+render();
+try{
+  if(state.config.clientId) initMsal();
+}catch(e){
+  console.error("MSAL init failed on load:", e);
+}
+</script>
+</body>
+</html>
